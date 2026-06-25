@@ -5,37 +5,14 @@ import type { PublicRoom } from "@/types/game";
 
 export const runtime = "nodejs";
 
-type TransactionResult = {
-  committed: boolean;
-  snapshotValue: PublicRoom | null;
-};
-
-function runRoomTransaction(
-  ref: any,
-  updater: (room: PublicRoom | null) => PublicRoom | undefined
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ roomId: string }> },
 ) {
-  return new Promise<TransactionResult>((resolve, reject) => {
-    ref.transaction(
-      (current: PublicRoom | null) => updater(current),
-      (error: Error | null, committed: boolean, snapshot?: { val: () => PublicRoom | null }) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve({ committed, snapshotValue: snapshot?.val() ?? null });
-      },
-      false
-    );
-  });
-}
-
-export async function POST(request: Request, { params }: { params: Promise<{ roomId: string }> }) {
-  let abortReason = "เลือกคำไม่สำเร็จ";
-
   try {
     const { roomId } = await params;
     const body = await request.json();
+
     const playerId = String(body.playerId || "");
     const wordId = String(body.wordId || "");
 
@@ -44,111 +21,136 @@ export async function POST(request: Request, { params }: { params: Promise<{ roo
     }
 
     const db = getAdminDatabase();
-    const dangerSnapshot = await db.ref(`rooms/${roomId}/private/dangerWordId`).get();
+    const publicRef = db.ref(`rooms/${roomId}/public`);
+
+    const roomSnapshot = await publicRef.get();
+
+    if (!roomSnapshot.exists()) {
+      return NextResponse.json({ message: "ไม่พบห้องนี้" }, { status: 404 });
+    }
+
+    const room = roomSnapshot.val() as PublicRoom;
+
+    const dangerSnapshot = await db
+      .ref(`rooms/${roomId}/private/dangerWordId`)
+      .get();
     const dangerWordId = dangerSnapshot.val();
 
     if (!dangerWordId) {
-      return NextResponse.json({ message: "ยังไม่มีเกมที่กำลังเล่นอยู่" }, { status: 400 });
+      return NextResponse.json(
+        { message: "ยังไม่มีเกมที่กำลังเล่นอยู่" },
+        { status: 400 },
+      );
     }
 
-    const publicRef = db.ref(`rooms/${roomId}/public`);
-    const result = await runRoomTransaction(publicRef, (room) => {
-      if (!room) {
-        abortReason = "ไม่พบห้องนี้";
-        return undefined;
-      }
+    const game = room.game;
+    const player = room.players?.[playerId];
+    const word = game?.words?.[wordId];
 
-      const game = room.game;
-      const player = room.players?.[playerId];
-      const word = game?.words?.[wordId];
+    if (!game || room.status !== "playing" || game.status !== "playing") {
+      return NextResponse.json(
+        { message: "เกมไม่ได้อยู่ในสถานะกำลังเล่น" },
+        { status: 409 },
+      );
+    }
 
-      if (!game || room.status !== "playing" || game.status !== "playing") {
-        abortReason = "เกมไม่ได้อยู่ในสถานะกำลังเล่น";
-        return undefined;
-      }
+    if (!player) {
+      return NextResponse.json(
+        { message: "ไม่พบผู้เล่นในห้องนี้" },
+        { status: 409 },
+      );
+    }
 
-      if (!player) {
-        abortReason = "ไม่พบผู้เล่นในห้องนี้";
-        return undefined;
-      }
+    if (game.turnPlayerId !== playerId) {
+      return NextResponse.json(
+        { message: "ยังไม่ถึงตาของคุณ" },
+        { status: 409 },
+      );
+    }
 
-      if (game.turnPlayerId !== playerId) {
-        abortReason = "ยังไม่ถึงตาของคุณ";
-        return undefined;
-      }
+    if (!word) {
+      return NextResponse.json({ message: "ไม่พบคำนี้" }, { status: 409 });
+    }
 
-      if (!word) {
-        abortReason = "ไม่พบคำนี้";
-        return undefined;
-      }
+    if (word.selectedBy) {
+      return NextResponse.json(
+        { message: "คำนี้ถูกเลือกไปแล้ว" },
+        { status: 409 },
+      );
+    }
 
-      if (word.selectedBy) {
-        abortReason = "คำนี้ถูกเลือกไปแล้ว";
-        return undefined;
-      }
+    const now = Date.now();
+    const isDanger = wordId === dangerWordId;
 
-      const now = Date.now();
-      const isDanger = wordId === dangerWordId;
-      const nextRoom: PublicRoom = {
-        ...room,
-        updatedAt: now,
-        game: {
-          ...game,
-          words: {
-            ...game.words,
-            [wordId]: {
-              ...word,
-              selectedBy: playerId,
-              selectedByName: player.name,
-              selectedAt: now,
-              ...(isDanger ? { dangerHit: true } : {}),
-            },
-          },
-          selectedCount: game.selectedCount + 1,
+    const nextGame = {
+      ...game,
+      words: {
+        ...game.words,
+        [wordId]: {
+          ...word,
+          selectedBy: playerId,
+          selectedByName: player.name,
+          selectedAt: now,
+          ...(isDanger ? { dangerHit: true } : {}),
         },
-      };
+      },
+      selectedCount: game.selectedCount + 1,
+    };
 
-      if (isDanger) {
-        const updatedPlayers = Object.fromEntries(
-          Object.entries(room.players).map(([id, item]) => {
-            const scoreDelta = id === playerId ? -3 : 2;
-            return [id, { ...item, score: (item.score || 0) + scoreDelta }];
-          })
-        );
+    let nextRoom: PublicRoom = {
+      ...room,
+      updatedAt: now,
+      game: nextGame,
+    };
 
-        nextRoom.status = "ended";
-        nextRoom.players = updatedPlayers;
-        nextRoom.game = {
-          ...nextRoom.game!,
+    if (isDanger) {
+      const updatedPlayers = Object.fromEntries(
+        Object.entries(room.players).map(([id, item]) => {
+          const scoreDelta = id === playerId ? -3 : 2;
+
+          return [
+            id,
+            {
+              ...item,
+              score: (item.score || 0) + scoreDelta,
+              lastSeenAt: id === playerId ? now : item.lastSeenAt,
+            },
+          ];
+        }),
+      );
+
+      nextRoom = {
+        ...nextRoom,
+        status: "ended",
+        players: updatedPlayers,
+        game: {
+          ...nextGame,
           status: "ended",
           endedAt: now,
           loserId: playerId,
           loserName: player.name,
           resultMessage: `${player.name} เลือกคำอันตรายและแพ้รอบนี้!`,
-        };
-
-        return nextRoom;
-      }
-
-      nextRoom.players = {
-        ...room.players,
-        [playerId]: {
-          ...player,
-          score: (player.score || 0) + 1,
-          lastSeenAt: now,
         },
       };
-      nextRoom.game = {
-        ...nextRoom.game!,
-        turnPlayerId: nextTurnPlayerId(game.turnOrder, playerId),
+    } else {
+      nextRoom = {
+        ...nextRoom,
+        players: {
+          ...room.players,
+          [playerId]: {
+            ...player,
+            score: (player.score || 0) + 1,
+            lastSeenAt: now,
+          },
+        },
+        game: {
+          ...nextGame,
+          turnPlayerId: nextTurnPlayerId(game.turnOrder, playerId),
+        },
       };
-
-      return nextRoom;
-    });
-
-    if (!result.committed) {
-      return NextResponse.json({ message: abortReason }, { status: 409 });
     }
+
+    await publicRef.set(nextRoom);
 
     return NextResponse.json({ ok: true });
   } catch (error) {

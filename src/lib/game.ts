@@ -1,4 +1,4 @@
-import type { DangerClue, GameMode, GameWord, Player, PublicGame, WordPower } from "@/types/game";
+import type { DangerClue, GameMode, GameWord, PickRisk, Player, PublicGame, ShopItemType, WordPower } from "@/types/game";
 import { WORD_BANKS } from "@/data/word-banks";
 
 export const GAME_MODES: Record<GameMode, { label: string; description: string; emoji: string }> = {
@@ -78,6 +78,61 @@ export const POWER_INFO: Record<
     emoji: "🔄",
     safeScore: 2,
     dangerPenalty: () => -3,
+  },
+};
+
+
+export const WAGER_INFO: Record<
+  PickRisk,
+  { label: string; shortLabel: string; description: string; emoji: string; safeBonus: number; dangerPenalty: number }
+> = {
+  safe: {
+    label: "Safe Pick",
+    shortLabel: "SAFE",
+    description: "เล่นเซฟ ได้คะแนนจากคำตามปกติ ถ้าโดนระเบิดใช้โทษของคำนั้น",
+    emoji: "🟢",
+    safeBonus: 0,
+    dangerPenalty: -3,
+  },
+  risk: {
+    label: "Risk Pick",
+    shortLabel: "+3",
+    description: "ถ้ารอดได้โบนัสเพิ่ม +3 แต่ถ้าโดนระเบิดโทษขั้นต่ำ -5",
+    emoji: "🟠",
+    safeBonus: 3,
+    dangerPenalty: -5,
+  },
+  allIn: {
+    label: "All-in Pick",
+    shortLabel: "+7",
+    description: "ถ้ารอดได้โบนัสเพิ่ม +7 แต่ถ้าโดนระเบิดโทษขั้นต่ำ -10",
+    emoji: "🔴",
+    safeBonus: 7,
+    dangerPenalty: -10,
+  },
+};
+
+export const SHOP_ITEMS: Record<
+  ShopItemType,
+  { label: string; description: string; emoji: string; cost: number }
+> = {
+  shield: {
+    label: "Shield",
+    description: "ถือไว้แล้วกันระเบิดอัตโนมัติ 1 ครั้ง ระเบิดจะถูกย้ายไปคำอื่นและคุณเสีย 4 แต้ม",
+    emoji: "🛡️",
+    cost: 4,
+  },
+  peek: {
+    label: "Peek",
+    description: "แอบเช็ค 1 คำแบบส่วนตัวว่าปลอดภัยหรือเป็นระเบิด",
+    emoji: "👁️",
+    cost: 3,
+  },
+  freeze: {
+    label: "Freeze",
+    description: "ใช้ตอนถึงตาคุณ เพื่อข้ามคนถัดไปหลังคุณเลือกรอด",
+    emoji: "🧊",
+    cost: 5,
   },
 };
 
@@ -247,10 +302,11 @@ export function createRound(mode: GameMode, players: Record<string, Player>, rou
   return { game, dangerWordId };
 }
 
-export function nextTurnPlayerId(turnOrder: string[], currentPlayerId: string) {
+export function nextTurnPlayerId(turnOrder: string[], currentPlayerId: string, step = 1) {
   if (turnOrder.length === 0) return currentPlayerId;
   const currentIndex = Math.max(0, turnOrder.indexOf(currentPlayerId));
-  return turnOrder[(currentIndex + 1) % turnOrder.length];
+  const safeStep = Math.max(1, step);
+  return turnOrder[(currentIndex + safeStep) % turnOrder.length];
 }
 
 function findCategory(text: string, rules: { category: string; detail: string; words: string[] }[], fallback: DangerClue): DangerClue {
@@ -285,4 +341,27 @@ export function getDangerPenalty(power: WordPower, playerCount: number) {
 
 export function getPowerSafeScore(power: WordPower) {
   return POWER_INFO[power].safeScore;
+}
+
+export function isPickRisk(value: unknown): value is PickRisk {
+  return value === "safe" || value === "risk" || value === "allIn";
+}
+
+export function isShopItemType(value: unknown): value is ShopItemType {
+  return value === "shield" || value === "peek" || value === "freeze";
+}
+
+export function getInventoryCount(player: Player | undefined, item: ShopItemType) {
+  return Math.max(0, Number(player?.inventory?.[item] || 0));
+}
+
+export function updateInventory(player: Player, item: ShopItemType, delta: number): Player {
+  const nextCount = Math.max(0, getInventoryCount(player, item) + delta);
+  return {
+    ...player,
+    inventory: {
+      ...(player.inventory || {}),
+      [item]: nextCount,
+    },
+  };
 }

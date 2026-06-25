@@ -11,7 +11,6 @@ import {
   Crown,
   Loader2,
   LogIn,
-  Play,
   RotateCcw,
   Share2,
   Sparkles,
@@ -23,11 +22,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { getClientDatabase } from "@/lib/firebase-client";
-import { GAME_MODES, POWER_INFO } from "@/lib/game";
+import { GAME_MODES, POWER_INFO, SHOP_ITEMS, WAGER_INFO } from "@/lib/game";
 import { cn } from "@/lib/utils";
-import type { GameMode, GameWord, Player, PublicRoom, WordPower } from "@/types/game";
+import type { BluffMarker, GameMode, GameWord, PickRisk, Player, PublicRoom, ShopItemType, WordPower } from "@/types/game";
 
 const MODE_ORDER: GameMode[] = ["objects", "worldcup2026", "places"];
+const PICK_RISK_ORDER: PickRisk[] = ["safe", "risk", "allIn"];
+const SHOP_ITEM_ORDER: ShopItemType[] = ["shield", "peek", "freeze"];
+
+const MARKER_INFO: Record<BluffMarker, { label: string; emoji: string; className: string }> = {
+  suspect: { label: "น่าสงสัย", emoji: "🚩", className: "bg-red-100 text-red-700" },
+  safe: { label: "น่าปลอดภัย", emoji: "🟢", className: "bg-emerald-100 text-emerald-700" },
+  bait: { label: "ล่อเพื่อน", emoji: "🎭", className: "bg-violet-100 text-violet-700" },
+};
 
 const POWER_CARD_CLASS: Record<WordPower, string> = {
   normal: "border-slate-200 bg-white/80 hover:border-sky-300 hover:shadow-sky-200/60",
@@ -49,6 +56,19 @@ const POWER_BADGE_CLASS: Record<WordPower, string> = {
   reverse: "bg-emerald-500 text-white",
 };
 
+type PeekResult = "safe" | "danger";
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function markerSummary(markers: Record<string, BluffMarker> | undefined) {
+  const values = Object.values(markers || {}) as BluffMarker[];
+  return (Object.keys(MARKER_INFO) as BluffMarker[])
+    .map((marker) => ({ marker, count: values.filter((item) => item === marker).length }))
+    .filter((item) => item.count > 0);
+}
+
 export function GameRoom({ roomId }: { roomId: string }) {
   const [room, setRoom] = useState<PublicRoom | null>(null);
   const [isMissing, setIsMissing] = useState(false);
@@ -61,6 +81,13 @@ export function GameRoom({ roomId }: { roomId: string }) {
   const [copied, setCopied] = useState(false);
   const [personalHints, setPersonalHints] = useState<string[]>([]);
   const [revealedSafeWordIds, setRevealedSafeWordIds] = useState<string[]>([]);
+  const [peekResults, setPeekResults] = useState<Record<string, PeekResult>>({});
+  const [pickRisk, setPickRisk] = useState<PickRisk>("safe");
+  const [guessMode, setGuessMode] = useState(false);
+  const [animatingWordId, setAnimatingWordId] = useState<string | null>(null);
+  const [flippingWordId, setFlippingWordId] = useState<string | null>(null);
+  const [scoreBurst, setScoreBurst] = useState<{ wordId: string; delta: number } | null>(null);
+  const [boomOverlay, setBoomOverlay] = useState<string | null>(null);
 
   useEffect(() => {
     const storedPlayerId = localStorage.getItem("bombword.playerId") || "";
@@ -89,6 +116,12 @@ export function GameRoom({ roomId }: { roomId: string }) {
   useEffect(() => {
     setPersonalHints([]);
     setRevealedSafeWordIds([]);
+    setPeekResults({});
+    setGuessMode(false);
+    setAnimatingWordId(null);
+    setFlippingWordId(null);
+    setScoreBurst(null);
+    setBoomOverlay(null);
   }, [room?.game?.round]);
 
   const players = useMemo(() => Object.values(room?.players || {}) as Player[], [room?.players]);
@@ -103,29 +136,65 @@ export function GameRoom({ roomId }: { roomId: string }) {
   const isMyTurn = game?.status === "playing" && game.turnPlayerId === playerId;
   const myPickDebt = game?.pickDebt?.[playerId] || 1;
   const specialWordsLeft = words.filter((word) => !word.selectedBy && (word.power || "normal") !== "normal").length;
+  const hasGuessedThisRound = Boolean(game?.guesses?.[playerId]);
+  const actionBusy = Boolean(busyAction || animatingWordId);
+
+  async function requestRoomApi(path: string, payload: Record<string, unknown>) {
+    const response = await fetch(`/api/rooms/${roomId}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(data.message || "ทำรายการไม่สำเร็จ");
+    }
+
+    return data;
+  }
 
   async function callRoomApi(path: string, payload: Record<string, unknown>, actionName: string) {
     setError("");
     setBusyAction(actionName);
 
     try {
-      const response = await fetch(`/api/rooms/${roomId}/${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data.message || "ทำรายการไม่สำเร็จ");
-      }
-
-      return data;
+      return await requestRoomApi(path, payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : "ทำรายการไม่สำเร็จ");
       return null;
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  function handlePrivateRewards(data: Record<string, unknown> | null) {
+    if (!data) return;
+
+    if (typeof data.hintText === "string") {
+      setPersonalHints((items) => [data.hintText as string, ...items].slice(0, 5));
+    }
+
+    if (Array.isArray(data.safeWordIds)) {
+      setRevealedSafeWordIds((items) => Array.from(new Set([...items, ...(data.safeWordIds as string[])])));
+    }
+  }
+
+  function playResultEffects(wordId: string, data: Record<string, unknown> | null) {
+    if (!data) return;
+
+    setFlippingWordId(wordId);
+    setTimeout(() => setFlippingWordId((current) => (current === wordId ? null : current)), 900);
+
+    if (typeof data.scoreDelta === "number") {
+      setScoreBurst({ wordId, delta: data.scoreDelta as number });
+      setTimeout(() => setScoreBurst((current) => (current?.wordId === wordId ? null : current)), 1100);
+    }
+
+    if (data.boom) {
+      const event = data.event as { message?: string } | undefined;
+      setBoomOverlay(event?.message || "BOOM! ระเบิดแตก");
+      setTimeout(() => setBoomOverlay(null), 2300);
     }
   }
 
@@ -151,15 +220,66 @@ export function GameRoom({ roomId }: { roomId: string }) {
   }
 
   async function pickWord(wordId: string) {
-    const data = await callRoomApi("pick", { playerId, wordId }, `pick-${wordId}`);
+    if (actionBusy) return;
 
-    if (typeof data?.hintText === "string") {
-      setPersonalHints((items) => [data.hintText as string, ...items].slice(0, 5));
+    if (guessMode) {
+      await guessDangerWord(wordId);
+      return;
     }
 
-    if (Array.isArray(data?.safeWordIds)) {
-      setRevealedSafeWordIds((items) => Array.from(new Set([...items, ...(data.safeWordIds as string[])])));
+    setError("");
+    setBusyAction(`pick-${wordId}`);
+    setAnimatingWordId(wordId);
+
+    try {
+      await sleep(1000);
+      const data = await requestRoomApi("pick", { playerId, wordId, pickRisk });
+      handlePrivateRewards(data);
+      playResultEffects(wordId, data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "เลือกคำไม่สำเร็จ");
+    } finally {
+      setAnimatingWordId(null);
+      setBusyAction(null);
     }
+  }
+
+  async function guessDangerWord(wordId: string) {
+    if (actionBusy) return;
+    setError("");
+    setBusyAction(`guess-${wordId}`);
+    setAnimatingWordId(wordId);
+
+    try {
+      await sleep(850);
+      const data = await requestRoomApi("guess", { playerId, wordId });
+      playResultEffects(wordId, data);
+      setGuessMode(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ทายคำอันตรายไม่สำเร็จ");
+    } finally {
+      setAnimatingWordId(null);
+      setBusyAction(null);
+    }
+  }
+
+  async function buyItem(itemType: ShopItemType) {
+    await callRoomApi("shop", { playerId, itemType }, `buy-${itemType}`);
+  }
+
+  async function useFreeze() {
+    await callRoomApi("item", { playerId, itemType: "freeze" }, "use-freeze");
+  }
+
+  async function usePeek(wordId: string) {
+    const data = await callRoomApi("item", { playerId, itemType: "peek", wordId }, `peek-${wordId}`);
+    if (typeof data?.peekIsDanger === "boolean") {
+      setPeekResults((items) => ({ ...items, [wordId]: data.peekIsDanger ? "danger" : "safe" }));
+    }
+  }
+
+  async function markWord(wordId: string, marker: BluffMarker | "clear") {
+    await callRoomApi("marker", { playerId, wordId, marker }, `marker-${wordId}-${marker}`);
   }
 
   async function copyShareUrl() {
@@ -232,6 +352,7 @@ export function GameRoom({ roomId }: { roomId: string }) {
 
   return (
     <main className="relative mx-auto min-h-screen max-w-7xl overflow-hidden px-4 py-6 md:px-8">
+      {boomOverlay ? <BoomOverlay message={boomOverlay} /> : null}
       <div className="pointer-events-none absolute -left-28 top-20 h-72 w-72 rounded-full bg-fuchsia-400/25 blur-3xl" />
       <div className="pointer-events-none absolute -right-24 top-64 h-80 w-80 rounded-full bg-cyan-400/25 blur-3xl" />
 
@@ -265,7 +386,7 @@ export function GameRoom({ roomId }: { roomId: string }) {
 
       {error ? <p className="relative z-10 mb-5 rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700 shadow-sm">{error}</p> : null}
 
-      <div className="relative z-10 grid gap-6 lg:grid-cols-[1fr_360px]">
+      <div className="relative z-10 grid gap-6 lg:grid-cols-[1fr_370px]">
         <section className="space-y-6">
           {room?.status === "lobby" ? (
             <LobbyPanel isHost={isHost} players={players} busyAction={busyAction} onStart={startGame} />
@@ -289,11 +410,15 @@ export function GameRoom({ roomId }: { roomId: string }) {
                   </CardTitle>
                   <CardDescription className="mt-2 text-base">
                     {game.status === "playing"
-                      ? isMyTurn
-                        ? myPickDebt > 1
-                          ? `โดนบังคับเลือก 2 คำ! คุณยังต้องเลือกอีก ${myPickDebt} คำ`
-                          : "ถึงตาคุณแล้ว เลือกคำที่คุ้มที่สุด แต่ระวังทุกคำพิเศษก็อาจเป็นระเบิดได้"
-                        : "รอเจ้าของเทิร์นเลือกคำ ระหว่างนี้ดูคำพิเศษแล้วกดดันได้เต็มที่"
+                      ? guessMode
+                        ? hasGuessedThisRound
+                          ? "คุณทายไปแล้วในรอบนี้ ปิดโหมดทายแล้วเล่นตามเทิร์นต่อ"
+                          : "โหมดทายระเบิดเปิดอยู่: กดคำที่คิดว่าเป็นระเบิด ถ้าถูก +8 และจบรอบ ถ้าผิด -4"
+                        : isMyTurn
+                          ? myPickDebt > 1
+                            ? `โดนบังคับเลือก 2 คำ! คุณยังต้องเลือกอีก ${myPickDebt} คำ`
+                            : "ถึงตาคุณแล้ว เลือกแผน Safe / Risk / All-in แล้วกดคำที่คุ้มที่สุด"
+                          : "รอเจ้าของเทิร์นเลือกคำ ระหว่างนี้ปัก marker หลอกเพื่อน หรือใช้ Peek ได้"
                       : game.resultMessage}
                   </CardDescription>
                 </div>
@@ -311,51 +436,138 @@ export function GameRoom({ roomId }: { roomId: string }) {
                   ) : null}
                 </div>
               </CardHeader>
-              <CardContent className="p-4 md:p-6">
+              <CardContent className="space-y-5 p-4 md:p-6">
+                {game.status === "playing" ? (
+                  <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+                    <PickRiskPanel value={pickRisk} onChange={setPickRisk} disabled={!isMyTurn || actionBusy || guessMode} />
+                    <GuessPanel
+                      guessMode={guessMode}
+                      hasGuessed={hasGuessedThisRound}
+                      disabled={actionBusy || game.status !== "playing"}
+                      onToggle={() => setGuessMode((value) => !value)}
+                    />
+                  </div>
+                ) : null}
+
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
                   {words.map((word) => {
                     const isSelected = Boolean(word.selectedBy);
-                    const isPicking = busyAction === `pick-${word.id}`;
                     const revealedSafe = revealedSafeWordIds.includes(word.id);
+                    const peekResult = peekResults[word.id];
                     const wordPower = word.power || "normal";
                     const power = POWER_INFO[wordPower];
+                    const isAnimating = animatingWordId === word.id;
+                    const isFlipping = flippingWordId === word.id;
+                    const isWorking = busyAction === `pick-${word.id}` || busyAction === `guess-${word.id}`;
+                    const markerItems = markerSummary(game.markers?.[word.id]);
+                    const disabledMain = guessMode
+                      ? isSelected || hasGuessedThisRound || actionBusy || game.status !== "playing"
+                      : !isMyTurn || isSelected || actionBusy || game.status !== "playing";
 
                     return (
-                      <button
+                      <div
                         key={word.id}
-                        disabled={!isMyTurn || isSelected || Boolean(busyAction)}
-                        onClick={() => pickWord(word.id)}
                         className={cn(
-                          "word-card group relative min-h-32 overflow-hidden rounded-3xl border-2 p-3 text-left shadow-md transition-all duration-200 hover:-translate-y-1 hover:rotate-[-0.4deg] hover:shadow-xl active:scale-95 disabled:hover:translate-y-0 disabled:hover:rotate-0 disabled:hover:shadow-md",
+                          "word-card group relative min-h-40 overflow-hidden rounded-3xl border-2 p-3 shadow-md transition-all duration-200 hover:-translate-y-1 hover:rotate-[-0.4deg] hover:shadow-xl",
                           POWER_CARD_CLASS[wordPower],
-                          isMyTurn && !isSelected && "ring-2 ring-white/80",
+                          isMyTurn && !isSelected && !guessMode && "ring-2 ring-white/80",
+                          guessMode && !isSelected && "ring-4 ring-red-300/80",
                           isSelected && "border-slate-200 bg-slate-100/80 text-slate-500 grayscale-[0.2]",
                           word.dangerHit && "danger-pop border-red-500 bg-gradient-to-br from-red-100 to-orange-100 text-red-800 grayscale-0",
-                          revealedSafe && !isSelected && "safe-glow border-emerald-400 ring-4 ring-emerald-200"
+                          word.shieldedBy && "safe-glow border-emerald-400 bg-gradient-to-br from-emerald-50 to-cyan-50 grayscale-0",
+                          revealedSafe && !isSelected && "safe-glow border-emerald-400 ring-4 ring-emerald-200",
+                          peekResult === "danger" && !isSelected && "ring-4 ring-red-300",
+                          peekResult === "safe" && !isSelected && "ring-4 ring-emerald-300",
+                          isAnimating && "card-shake",
+                          isFlipping && "card-flip"
                         )}
                       >
+                        {scoreBurst?.wordId === word.id ? <div className={cn("score-burst", scoreBurst.delta >= 0 ? "text-emerald-700" : "text-red-700")}>{scoreBurst.delta >= 0 ? `+${scoreBurst.delta}` : scoreBurst.delta}</div> : null}
                         <div className="absolute -right-6 -top-6 h-20 w-20 rounded-full bg-white/35 transition-transform group-hover:scale-125" />
-                        <div className="relative flex h-full flex-col justify-between gap-3">
+                        <button
+                          disabled={disabledMain}
+                          onClick={() => pickWord(word.id)}
+                          className="relative flex h-full min-h-28 w-full flex-col justify-between gap-3 text-left disabled:cursor-not-allowed"
+                        >
                           <div className="flex items-start justify-between gap-2">
-                            <span className="text-2xl">{revealedSafe && !isSelected ? "🛡️" : power.emoji}</span>
-                            <span className={cn("rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", POWER_BADGE_CLASS[wordPower])}>
-                              {revealedSafe && !isSelected ? "SAFE" : power.shortLabel}
+                            <span className="text-2xl">
+                              {peekResult === "danger" && !isSelected ? "💣" : peekResult === "safe" && !isSelected ? "🛡️" : revealedSafe && !isSelected ? "🛡️" : power.emoji}
+                            </span>
+                            <span className={cn("rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", peekResult === "danger" ? "bg-red-600 text-white" : peekResult === "safe" ? "bg-emerald-500 text-white" : POWER_BADGE_CLASS[wordPower])}>
+                              {peekResult === "danger" ? "DANGER" : peekResult === "safe" ? "SAFE" : revealedSafe && !isSelected ? "SAFE" : power.shortLabel}
                             </span>
                           </div>
-                          <span className="text-base font-black leading-6 md:text-lg">{word.text}</span>
-                          <span className="text-xs font-bold leading-5 text-slate-600">
-                            {isPicking
-                              ? "กำลังเลือก..."
-                              : word.dangerHit
-                                ? `💥 ${word.selectedByName}`
-                                : isSelected
-                                  ? `เลือกโดย ${word.selectedByName}`
-                                  : revealedSafe
-                                    ? "สแกนแล้ว: ปลอดภัยแน่นอน"
-                                    : power.description}
-                          </span>
-                        </div>
-                      </button>
+
+                          <div>
+                            <span className="block text-base font-black leading-6 md:text-lg">{word.text}</span>
+                            <span className="mt-2 block text-xs font-bold leading-5 text-slate-600">
+                              {isWorking || isAnimating
+                                ? "ตึง... กำลังเปิดการ์ด"
+                                : word.dangerHit
+                                  ? `💥 ${word.selectedByName}`
+                                  : word.shieldedBy
+                                    ? `🛡️ Shield กันไว้โดย ${word.selectedByName}`
+                                    : isSelected
+                                      ? `เลือกโดย ${word.selectedByName}`
+                                      : peekResult === "danger"
+                                        ? "Peek ส่วนตัว: คำนี้คือระเบิด"
+                                        : peekResult === "safe"
+                                          ? "Peek ส่วนตัว: ปลอดภัย"
+                                          : revealedSafe
+                                            ? "สแกนแล้ว: ปลอดภัยแน่นอน"
+                                            : guessMode
+                                              ? "กดเพื่อทายว่าเป็นระเบิด"
+                                              : power.description}
+                            </span>
+                          </div>
+                        </button>
+
+                        {markerItems.length ? (
+                          <div className="relative mt-2 flex flex-wrap gap-1">
+                            {markerItems.map(({ marker, count }) => (
+                              <span key={marker} className={cn("rounded-full px-2 py-0.5 text-[10px] font-black", MARKER_INFO[marker].className)}>
+                                {MARKER_INFO[marker].emoji} {count}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {game.status === "playing" && !isSelected ? (
+                          <div className="relative mt-2 flex flex-wrap gap-1">
+                            {(Object.keys(MARKER_INFO) as BluffMarker[]).map((marker) => (
+                              <button
+                                key={marker}
+                                type="button"
+                                disabled={actionBusy}
+                                onClick={() => markWord(word.id, marker)}
+                                className="rounded-full bg-white/80 px-2 py-1 text-xs shadow-sm transition hover:-translate-y-0.5 disabled:opacity-50"
+                                title={MARKER_INFO[marker].label}
+                              >
+                                {MARKER_INFO[marker].emoji}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              disabled={actionBusy}
+                              onClick={() => markWord(word.id, "clear")}
+                              className="rounded-full bg-white/80 px-2 py-1 text-xs shadow-sm transition hover:-translate-y-0.5 disabled:opacity-50"
+                              title="ลบ marker ของคุณ"
+                            >
+                              🧽
+                            </button>
+                            {(currentPlayer.inventory?.peek || 0) > 0 ? (
+                              <button
+                                type="button"
+                                disabled={actionBusy || Boolean(peekResult)}
+                                onClick={() => usePeek(word.id)}
+                                className="ml-auto rounded-full bg-cyan-500 px-2 py-1 text-xs font-black text-white shadow-sm transition hover:-translate-y-0.5 disabled:opacity-50"
+                              >
+                                👁️ Peek
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
                     );
                   })}
                 </div>
@@ -365,8 +577,9 @@ export function GameRoom({ roomId }: { roomId: string }) {
         </section>
 
         <aside className="space-y-6">
-          <PersonalIntelPanel hints={personalHints} revealedCount={revealedSafeWordIds.length} />
+          <PersonalIntelPanel hints={personalHints} revealedCount={revealedSafeWordIds.length} peekResults={peekResults} words={words} />
           <LeaderboardPanel players={sortedPlayers} currentPlayerId={playerId} />
+          <ShopPanel currentPlayer={currentPlayer} busyAction={busyAction} isMyTurn={isMyTurn} pendingFreezeBy={game?.pendingFreezeBy} onBuy={buyItem} onUseFreeze={useFreeze} />
           <EventLogPanel game={game} />
           <PlayersPanel players={players} room={room} turnPlayerId={game?.turnPlayerId} />
           <PowerGuidePanel />
@@ -394,9 +607,7 @@ function LobbyPanel({
           <Sparkles className="h-4 w-4" /> New battle rules
         </div>
         <CardTitle className="text-3xl md:text-4xl">เลือกโหมดเพื่อเริ่มเกม</CardTitle>
-        <CardDescription>
-          {isHost ? "คุณเป็นคนสร้างห้อง เลือกโหมดแล้วเริ่มเกมได้เลย" : "รอคนสร้างห้องเลือกโหมดและเริ่มเกม"}
-        </CardDescription>
+        <CardDescription>{isHost ? "คุณเป็นคนสร้างห้อง เลือกโหมดแล้วเริ่มเกมได้เลย" : "รอคนสร้างห้องเลือกโหมดและเริ่มเกม"}</CardDescription>
       </CardHeader>
       <CardContent className="p-4 md:p-6">
         <div className="grid gap-4 md:grid-cols-3">
@@ -421,17 +632,67 @@ function LobbyPanel({
   );
 }
 
-function PersonalIntelPanel({ hints, revealedCount }: { hints: string[]; revealedCount: number }) {
-  if (!hints.length && !revealedCount) return null;
+function PickRiskPanel({ value, onChange, disabled }: { value: PickRisk; onChange: (value: PickRisk) => void; disabled: boolean }) {
+  return (
+    <div className="rounded-3xl border border-white/70 bg-white/55 p-3">
+      <p className="mb-2 text-sm font-black text-slate-700">เลือกแผนก่อนกดคำ</p>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {PICK_RISK_ORDER.map((risk) => (
+          <button
+            key={risk}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(risk)}
+            className={cn(
+              "rounded-2xl border-2 p-3 text-left transition-all hover:-translate-y-0.5 disabled:opacity-60",
+              value === risk ? "border-fuchsia-400 bg-gradient-to-br from-fuchsia-100 to-cyan-100 shadow-lg" : "border-white/70 bg-white/70"
+            )}
+          >
+            <p className="text-sm font-black">{WAGER_INFO[risk].emoji} {WAGER_INFO[risk].label}</p>
+            <p className="mt-1 text-xs leading-5 text-slate-600">{WAGER_INFO[risk].description}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GuessPanel({ guessMode, hasGuessed, disabled, onToggle }: { guessMode: boolean; hasGuessed: boolean; disabled: boolean; onToggle: () => void }) {
+  return (
+    <div className="rounded-3xl border border-red-200 bg-gradient-to-br from-red-50 to-orange-50 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-black text-red-800">🎯 ทายคำระเบิด</p>
+          <p className="mt-1 text-xs leading-5 text-red-700">ทายถูก +8 จบรอบทันที / ทายผิด -4 ใช้ได้รอบละ 1 ครั้ง</p>
+        </div>
+        <Button type="button" variant={guessMode ? "destructive" : "secondary"} disabled={disabled || hasGuessed} onClick={onToggle} className="shrink-0">
+          {hasGuessed ? "ทายแล้ว" : guessMode ? "ปิด" : "เปิด"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PersonalIntelPanel({ hints, revealedCount, peekResults, words }: { hints: string[]; revealedCount: number; peekResults: Record<string, PeekResult>; words: GameWord[] }) {
+  const peekEntries = Object.entries(peekResults);
+  if (!hints.length && !revealedCount && !peekEntries.length) return null;
 
   return (
     <Card className="game-panel border-violet-200">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-2xl">🧠 Intel ส่วนตัว</CardTitle>
-        <CardDescription>ข้อมูลนี้เห็นเฉพาะเครื่องคุณจากผลของคำใบ้/สแกน</CardDescription>
+        <CardDescription>ข้อมูลนี้เห็นเฉพาะเครื่องคุณจาก Hint / Scanner / Peek</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {revealedCount ? <div className="rounded-2xl bg-emerald-50 p-3 text-sm font-bold text-emerald-800">🛡️ สแกนพบคำปลอดภัยแล้ว {revealedCount} คำ บนกระดานจะขึ้นป้าย SAFE</div> : null}
+        {peekEntries.map(([wordId, result]) => {
+          const word = words.find((item) => item.id === wordId);
+          return (
+            <div key={wordId} className={cn("rounded-2xl p-3 text-sm font-bold leading-6", result === "danger" ? "bg-red-50 text-red-800" : "bg-emerald-50 text-emerald-800")}>
+              👁️ Peek “{word?.text || wordId}”: {result === "danger" ? "เป็นระเบิด" : "ปลอดภัย"}
+            </div>
+          );
+        })}
         {hints.map((hint, index) => (
           <div key={`${hint}-${index}`} className="rounded-2xl bg-violet-50 p-3 text-sm font-bold leading-6 text-violet-800">
             🕵️ {hint}
@@ -444,7 +705,7 @@ function PersonalIntelPanel({ hints, revealedCount }: { hints: string[]; reveale
 
 function LeaderboardPanel({ players, currentPlayerId }: { players: Player[]; currentPlayerId: string }) {
   return (
-    <Card className="game-panel">
+    <Card className="game-panel score-box">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-2xl">
           <Trophy className="h-5 w-5 text-yellow-500" /> Leaderboard
@@ -463,11 +724,66 @@ function LeaderboardPanel({ players, currentPlayerId }: { players: Player[]; cur
                   {player.name} {player.isHost ? <Crown className="ml-1 inline h-4 w-4 text-amber-500" /> : null}
                 </p>
                 <p className="text-xs font-medium text-slate-500">{player.id === currentPlayerId ? "คุณ" : "ผู้เล่น"}</p>
+                <p className="mt-1 text-xs font-bold text-slate-500">
+                  🛡️ {player.inventory?.shield || 0} · 👁️ {player.inventory?.peek || 0} · 🧊 {player.inventory?.freeze || 0}
+                </p>
               </div>
             </div>
             <p className="text-2xl font-black">{player.score}</p>
           </div>
         ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ShopPanel({
+  currentPlayer,
+  busyAction,
+  isMyTurn,
+  pendingFreezeBy,
+  onBuy,
+  onUseFreeze,
+}: {
+  currentPlayer: Player;
+  busyAction: string | null;
+  isMyTurn: boolean;
+  pendingFreezeBy?: string;
+  onBuy: (itemType: ShopItemType) => void;
+  onUseFreeze: () => void;
+}) {
+  return (
+    <Card className="game-panel border-cyan-200">
+      <CardHeader>
+        <CardTitle className="text-2xl">🛒 Item Shop</CardTitle>
+        <CardDescription>ใช้คะแนนซื้อไอเทมเพื่อพลิกเกม คะแนนคุณ: {currentPlayer.score}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {SHOP_ITEM_ORDER.map((itemType) => {
+          const item = SHOP_ITEMS[itemType];
+          const count = currentPlayer.inventory?.[itemType] || 0;
+          return (
+            <div key={itemType} className="rounded-3xl border border-white/70 bg-white/70 p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-black">{item.emoji} {item.label} <span className="text-xs text-slate-500">x{count}</span></p>
+                  <p className="mt-1 text-xs leading-5 text-slate-600">{item.description}</p>
+                </div>
+                <Button size="sm" disabled={Boolean(busyAction) || currentPlayer.score < item.cost} onClick={() => onBuy(itemType)}>
+                  {busyAction === `buy-${itemType}` ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                  {item.cost} แต้ม
+                </Button>
+              </div>
+              {itemType === "freeze" && count > 0 ? (
+                <Button size="sm" variant="secondary" disabled={Boolean(busyAction) || !isMyTurn || pendingFreezeBy === currentPlayer.id} onClick={onUseFreeze} className="mt-3 w-full bg-cyan-100 text-cyan-900">
+                  {pendingFreezeBy === currentPlayer.id ? "เปิด Freeze แล้ว" : "ใช้ Freeze ตอนนี้"}
+                </Button>
+              ) : null}
+              {itemType === "peek" && count > 0 ? <p className="mt-2 text-xs font-bold text-cyan-700">กดปุ่ม 👁️ Peek บนการ์ดคำที่อยากเช็ค</p> : null}
+              {itemType === "shield" && count > 0 ? <p className="mt-2 text-xs font-bold text-emerald-700">Shield จะทำงานอัตโนมัติเมื่อคุณโดนระเบิด</p> : null}
+            </div>
+          );
+        })}
       </CardContent>
     </Card>
   );
@@ -483,7 +799,7 @@ function EventLogPanel({ game }: { game?: PublicRoom["game"] }) {
         <CardDescription>เหตุการณ์ล่าสุดในรอบนี้</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {game.events.slice(0, 5).map((event) => (
+        {game.events.slice(0, 6).map((event) => (
           <div key={event.id} className="rounded-2xl bg-white/70 p-3 text-sm shadow-sm">
             <p className="font-black">
               <span className="mr-1">{event.emoji}</span> {event.title}
@@ -521,7 +837,7 @@ function PowerGuidePanel() {
   return (
     <Card className="game-panel">
       <CardHeader>
-        <CardTitle className="text-2xl">คำพิเศษ</CardTitle>
+        <CardTitle className="text-2xl">คำพิเศษ + Marker</CardTitle>
         <CardDescription>เลือกเพื่อพลิกเกม แต่ทุกใบก็อาจเป็นคำอันตราย</CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -534,7 +850,23 @@ function PowerGuidePanel() {
             </div>
           </div>
         ))}
+        <div className="rounded-2xl bg-white/70 p-3 text-sm leading-6 text-slate-600">
+          <p className="font-black text-slate-800">Marker คือการปั่นเพื่อน</p>
+          <p>🚩 น่าสงสัย · 🟢 น่าปลอดภัย · 🎭 ล่อเพื่อน — Marker ไม่ได้บอกความจริง ใช้หลอกกันได้เต็มที่</p>
+        </div>
       </CardContent>
     </Card>
+  );
+}
+
+function BoomOverlay({ message }: { message: string }) {
+  return (
+    <div className="boom-screen fixed inset-0 z-50 flex items-center justify-center p-6">
+      <div className="boom-card text-center">
+        <div className="text-7xl md:text-9xl">💥</div>
+        <h2 className="mt-3 text-5xl font-black text-white md:text-7xl">BOOM!</h2>
+        <p className="mt-4 max-w-xl text-lg font-bold leading-8 text-white/90">{message}</p>
+      </div>
+    </div>
   );
 }

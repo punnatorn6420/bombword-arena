@@ -55,7 +55,7 @@ export function CreateRoomForm() {
         />
       </div>
       {error ? <p className="rounded-xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</p> : null}
-      <Button className="w-full" size="lg" disabled={isLoading || !playerName.trim()}>
+      <Button className="w-full bg-gradient-to-r from-fuchsia-600 via-blue-600 to-cyan-500 text-white shadow-lg shadow-blue-300/40" size="lg" disabled={isLoading || !playerName.trim()}>
         {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
         สร้างห้องเล่นเกม
       </Button>

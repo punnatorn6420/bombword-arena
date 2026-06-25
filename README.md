@@ -1,99 +1,57 @@
 # Bombword Arena
 
-Realtime party game built with Next.js, Tailwind CSS, shadcn-style UI components, and Firebase Realtime Database.
+Realtime party game built with **Next.js**, **Tailwind CSS**, shadcn-style UI components, and **Firebase Realtime Database**.
 
-## Game concept
+## Game Concept
 
-ผู้เล่นเข้าห้องเดียวกัน แล้วเลือกโหมดเกม จากนั้นระบบจะสุ่มคำขึ้นมา 40 คำ พร้อมซ่อนคำอันตรายไว้ 1 คำ
+สร้างห้อง ชวนเพื่อน เลือกโหมด แล้วผลัดกันเลือกคำจาก 40 คำ โดยมีคำอันตรายซ่อนอยู่ 1 คำ ถ้าใครเลือกโดน เกมจบทันทีและคนนั้นแพ้รอบนั้น
 
-- เลือกคำปลอดภัย: ได้ +1 คะแนน แล้วส่งเทิร์นให้คนถัดไป
-- เลือกคำอันตราย: เกมจบรอบทันที คนเลือกได้ -3 คะแนน คนอื่นได้ +2 คะแนน
-- กดเริ่มตาใหม่ได้ โดยคะแนน leaderboard ของห้องเดิมยังอยู่
+เวอร์ชันนี้เพิ่มระบบ **Power Words** ทำให้เกมไม่ใช่แค่สุ่มคลิกแล้วรอด/ไม่รอด แต่ผู้เล่นต้องเลือกว่าจะเสี่ยงกับคำที่ให้ผลตอบแทนสูงแค่ไหน
 
-## Tech stack
+## Power Words
 
-- Next.js App Router + TypeScript
-- Tailwind CSS
-- shadcn/ui style components copied into `src/components/ui`
-- Firebase Realtime Database for realtime room state
-- Firebase Admin SDK in Next.js Route Handlers for secure writes and hidden danger word
-- Deploy-ready for GitHub + Vercel
+| Power       | ผลเมื่อปลอดภัย                                 | ถ้าเป็นคำอันตราย   |
+| ----------- | ---------------------------------------------- | ------------------ |
+| ✨ คำธรรมดา | +1                                             | -3                 |
+| 💎 Jackpot  | +5                                             | -5                 |
+| ⚔️ Raid     | คุณ +2, คนอื่น -1                              | ลบเท่าจำนวนผู้เล่น |
+| 🕵️ Hint     | +1 และได้คำใบ้ส่วนตัวเกี่ยวกับหมวดของคำอันตราย | -2                 |
+| 📡 Scanner  | +1 และสแกนเจอคำปลอดภัย 3 คำแบบส่วนตัว          | -3                 |
+| 🔥 x2 Trap  | +1 และคนถัดไปต้องเลือก 2 คำ                    | -4                 |
+| 🔄 Reverse  | +2 และกลับทิศทางเทิร์น                         | -3                 |
 
-## Word banks
+## Modes
 
-`src/data/word-banks.ts`
+- สิ่งของ
+- ทีมบอลโลก 2026
+- สถานที่
 
-- `objects`: 200 คำ สุ่มมา 40 คำ
-- `worldcup2026`: 48 ทีม สุ่มมา 40 ทีม
-- `places`: 200 คำ สุ่มมา 40 คำ
+โหมดสิ่งของและสถานที่จะใช้ word bank ภายในโปรเจ็ค แล้วสุ่มมา 40 คำต่อรอบ ส่วนคำใบ้ของคำอันตรายใช้ระบบ category rules ใน `src/lib/game.ts`
 
-แนวทางนี้เหมาะกว่าเรียก AI หรือ external API ทุกครั้ง เพราะเกมต้องเร็ว คุมคำได้ และไม่มีค่าใช้จ่ายเพิ่ม ถ้าอยากเพิ่มความสดใหม่ค่อยทำหน้า Admin เพิ่ม/แก้ word bank ภายหลังได้
-
-## 1) Install
+## Setup
 
 ```bash
 pnpm install
+cp .env.example .env.local
 pnpm dev
 ```
 
-เปิดเว็บที่ `http://localhost:3000`
-
-## 2) Create Firebase project
-
-1. ไปที่ Firebase Console
-2. Create project
-3. Add app: Web app
-4. Copy Firebase config มาใส่ `.env.local`
-5. Build > Realtime Database > Create Database
-6. เลือก region ที่ใกล้ไทย เช่น Asia Southeast ถ้ามีให้เลือก
-7. ตั้ง Rules ตามไฟล์ `database.rules.json`
-
-## 3) Environment variables
-
-สร้างไฟล์ `.env.local` จาก `.env.example`
-
-```bash
-cp .env.example .env.local
-```
-
-ค่าฝั่ง client:
+## Environment Variables
 
 ```env
-NEXT_PUBLIC_FIREBASE_API_KEY=your_api_key
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_DATABASE_URL=https://your_project-default-rtdb.asia-southeast1.firebasedatabase.app
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
-NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_DATABASE_URL=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+
+FIREBASE_SERVICE_ACCOUNT_BASE64=
+FIREBASE_ADMIN_DATABASE_URL=
 ```
 
-ค่าฝั่ง server:
+## Firebase Realtime Database Rules
 
-```env
-FIREBASE_SERVICE_ACCOUNT_BASE64=base64_encoded_service_account_json
-FIREBASE_ADMIN_DATABASE_URL=https://your_project-default-rtdb.asia-southeast1.firebasedatabase.app
-```
-
-### Generate `FIREBASE_SERVICE_ACCOUNT_BASE64`
-
-Firebase Console > Project settings > Service accounts > Generate new private key
-
-macOS/Linux:
-
-```bash
-base64 -i service-account.json
-```
-
-Windows PowerShell:
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("service-account.json"))
-```
-
-นำ string ยาว ๆ ที่ได้ไปใส่ใน `.env.local` และใน Vercel Environment Variables
-
-## 4) Firebase Realtime Database Rules
-
-ใช้ rules นี้เพื่อให้ client อ่านได้เฉพาะ public room state และเขียนเองไม่ได้ ทุกการเขียนผ่าน Next.js API + Firebase Admin SDK เท่านั้น
+ใช้ rules ใน `database.rules.json`
 
 ```json
 {
@@ -114,35 +72,11 @@ Windows PowerShell:
 }
 ```
 
-ถ้าใช้ Firebase CLI:
+Client อ่านข้อมูลห้องจาก `public` เพื่อ realtime sync แต่การเขียนทั้งหมดผ่าน Next.js API routes + Firebase Admin SDK เท่านั้น
 
-```bash
-firebase deploy --only database
-```
+## Deploy
 
-หรือ copy rules ไปวางใน Firebase Console ก็ได้
-
-## 5) Deploy to GitHub + Vercel
-
-```bash
-git init
-git add .
-git commit -m "init bombword arena"
-git branch -M main
-git remote add origin https://github.com/<your-username>/bombword-arena.git
-git push -u origin main
-```
-
-จากนั้นไปที่ Vercel:
-
-1. Add New Project
-2. Import GitHub repo
-3. Framework: Next.js
-4. Add Environment Variables ทั้งหมดจาก `.env.local`
-5. Deploy
-
-## Notes
-
-ตอนนี้ยังไม่มีระบบ Login จริง ใช้ `localStorage` เก็บ player id/name เพื่อให้เริ่มเล่นง่ายก่อน ถ้าจะจริงจังขึ้น แนะนำเพิ่ม Firebase Auth แบบ anonymous auth แล้วใช้ uid เป็น player id
-
-คำอันตรายถูกเก็บไว้ใน `rooms/{roomId}/private/dangerWordId` ซึ่ง client อ่านไม่ได้ตาม rules แต่ Firebase Admin SDK ใน API routes อ่าน/เขียนได้
+1. Push ขึ้น GitHub
+2. Import repo ใน Vercel
+3. ใส่ Environment Variables ให้ครบใน Vercel
+4. Deploy

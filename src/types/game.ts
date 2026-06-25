@@ -1,6 +1,8 @@
 export type GameMode = "objects" | "worldcup2026" | "places";
 export type RoomStatus = "lobby" | "playing" | "ended";
 
+export type WordPower = "normal" | "bonus" | "raid" | "hint" | "scanner" | "doublePick" | "reverse";
+
 export interface Player {
   id: string;
   name: string;
@@ -13,10 +15,23 @@ export interface Player {
 export interface GameWord {
   id: string;
   text: string;
+  power: WordPower;
   selectedBy?: string;
   selectedByName?: string;
   selectedAt?: number;
   dangerHit?: boolean;
+}
+
+export interface GameEvent {
+  id: string;
+  at: number;
+  type: "safe" | "danger" | "power";
+  emoji: string;
+  title: string;
+  message: string;
+  playerId: string;
+  playerName: string;
+  wordText: string;
 }
 
 export interface PublicGame {
@@ -28,6 +43,8 @@ export interface PublicGame {
   starterPlayerId: string;
   turnPlayerId: string;
   selectedCount: number;
+  pickDebt?: Record<string, number>;
+  events?: GameEvent[];
   startedAt: number;
   endedAt?: number;
   loserId?: string;
@@ -45,4 +62,9 @@ export interface PublicRoom {
   game?: PublicGame;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface DangerClue {
+  category: string;
+  detail: string;
 }
